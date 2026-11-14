@@ -13,7 +13,7 @@ Requires in the same folder:
     face_landmarker.task    (the MediaPipe model)
 
 Dependencies:
-    pip install mediapipe opencv-python pyserial
+    pip install mediapipe "opencv-python<5" pyserial
 
 Controls (focus the preview window):
     q   quit
@@ -29,16 +29,16 @@ from mediapipe.tasks.python import vision
 from expression import detect_expression
 
 # ---------------------------------------------------------------------------
-# Config
+# Config -- edit these to match your setup
 # ---------------------------------------------------------------------------
 
-# macOS:   "/dev/cu.usbmodem14101"
-# Windows: "COM3"
-# Linux:   "/dev/ttyACM0"
-SERIAL_PORT  = "/dev/cu.usbmodem14101"
-SERIAL_BAUD  = 115200
-ARDUINO_BOOT_WAIT = 2.0        # seconds to wait after opening port (board auto-resets)
-MIN_HOLD_MS  = 200             # expression must persist this long before being sent
+SERIAL_PORT       = "/dev/cu.usbmodem11101"   # your Mega's current port
+SERIAL_BAUD       = 115200
+ARDUINO_BOOT_WAIT = 2.0                       # seconds to wait after opening the port
+MIN_HOLD_MS       = 200                       # expression must hold this long before sending
+
+# Flip to True to log every stage of every frame.  Leave False once things work.
+DEBUG = True
 
 EXPRESSION_TO_CHAR = {
     "neutral":  "N",
@@ -49,7 +49,7 @@ EXPRESSION_TO_CHAR = {
 }
 
 # ---------------------------------------------------------------------------
-# Serial
+# Serial setup
 # ---------------------------------------------------------------------------
 
 ser = None
@@ -58,7 +58,6 @@ try:
     ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0)
     print(f"[serial] Opened {SERIAL_PORT} @ {SERIAL_BAUD}. Waiting for Arduino reset...")
     time.sleep(ARDUINO_BOOT_WAIT)
-    # Drain any boot banner so our commands aren't mixed with it.
     try:
         ser.reset_input_buffer()
     except Exception:
@@ -67,6 +66,7 @@ try:
 except Exception as e:
     print(f"[serial] Could not open {SERIAL_PORT}: {e}")
     print("[serial] Running vision-only. Fix SERIAL_PORT to drive servos.")
+
 
 def send_char(c):
     if ser is None:
@@ -78,8 +78,9 @@ def send_char(c):
         print(f"[serial] Write error: {e}")
         return False
 
+
 # ---------------------------------------------------------------------------
-# MediaPipe
+# MediaPipe setup
 # ---------------------------------------------------------------------------
 
 options = vision.FaceLandmarkerOptions(
@@ -95,21 +96,29 @@ if not camera.isOpened():
     landmarker.close()
     raise RuntimeError("Could not open webcam.")
 
+
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
 timestamp_ms  = 0
-pending_expr  = None           # last expression observed (may not have been sent yet)
-pending_since = 0              # when we first saw pending_expr
-last_sent     = None           # last expression actually shipped to the Arduino
+pending_expr  = None
+pending_since = 0
+last_sent     = None
+frame_num     = 0
 
 print("Face -> servo bridge running. Press Q to quit, R to force a resend.")
 
 try:
     while True:
+        if DEBUG:
+            print(f"[dbg] top of loop frame_num={frame_num}")
+
         success, frame = camera.read()
+        frame_num += 1
         if not success:
+            if DEBUG:
+                print("[dbg] camera.read() returned False -- exiting")
             break
 
         frame = cv2.flip(frame, 1)
@@ -117,7 +126,11 @@ try:
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
         timestamp_ms += 33
 
+        if DEBUG:
+            print("[dbg] before mediapipe")
         result = landmarker.detect_for_video(mp_image, timestamp_ms)
+        if DEBUG:
+            print("[dbg] after mediapipe")
 
         expression = "neutral"
         if result.face_blendshapes:
@@ -135,7 +148,7 @@ try:
                 last_sent = expression
                 print(f"[send] {expression} -> {c}")
 
-        # ---- Overlay ----
+        # Overlay
         cv2.putText(frame, f"detected: {expression}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
         cv2.putText(frame, f"sent:     {last_sent or '-'}",
@@ -144,9 +157,16 @@ try:
                     (10, frame.shape[0] - 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                     (0, 220, 0) if ser else (0, 0, 220), 1)
-        cv2.imshow("Face -> Servo Bridge", frame)
 
+        if DEBUG:
+            print("[dbg] before imshow")
+        cv2.imshow("Face -> Servo Bridge", frame)
+        if DEBUG:
+            print("[dbg] before waitKey")
         key = cv2.waitKey(1) & 0xFF
+        if DEBUG:
+            print(f"[dbg] after waitKey key={key}")
+
         if key == ord("q"):
             break
         elif key == ord("r"):
